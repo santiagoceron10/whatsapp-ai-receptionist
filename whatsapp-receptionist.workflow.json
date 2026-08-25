@@ -1,0 +1,402 @@
+{
+  "name": "WhatsApp AI Receptionist (salon)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-inbound",
+        "options": {}
+      },
+      "id": "whatsapp-inbound-mock-webhook",
+      "name": "WhatsApp inbound (MOCK webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        400
+      ],
+      "webhookId": "whatsapp-inbound-mock",
+      "notes": "SWAP-POINT / WHATSAPP INBOUND \u2014 replace with the Meta WhatsApp Cloud API webhook. Mock payload: { \"from\": \"+15551234567\", \"text\": \"Hi, do you do balayage?\", \"profile_name\": \"Maria\" }"
+    },
+    {
+      "parameters": {
+        "jsCode": "// NORMALIZE \u2014 flatten the mock WhatsApp inbound payload to { phone, text, name }.\n// SWAP-POINT (WHATSAPP INBOUND): the real shape comes from the Meta WhatsApp\n// Cloud API webhook: entry[].changes[].value.messages[] + .contacts[].profile.name.\n// Mock payload this scaffold expects (see the webhook node's sticky note):\n//   { \"from\": \"+15551234567\", \"text\": \"Hi, do you do balayage?\", \"profile_name\": \"Maria\" }\nconst body = $json.body ?? $json;\nconst msg  = (body.messages && body.messages[0]) ? body.messages[0] : body;\nconst phone = (body.from ?? msg.from ?? body.phone ?? '').toString().trim();\nconst text  = ((msg.text && msg.text.body) ?? body.text ?? '').toString().trim();\nconst name  = body.profile_name\n  ?? (body.contacts && body.contacts[0] && body.contacts[0].profile && body.contacts[0].profile.name)\n  ?? body.name ?? null;\nreturn [{ json: { phone, text, name } }];\n"
+      },
+      "id": "normalize-inbound",
+      "name": "Normalize inbound",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO customers (phone, name) VALUES ($1, $2)\nON CONFLICT (phone) DO UPDATE SET name = COALESCE(EXCLUDED.name, customers.name);",
+        "options": {
+          "queryReplacement": "={{ [$json.phone, $json.name] }}"
+        }
+      },
+      "id": "upsert-customer-phone",
+      "name": "Upsert customer (phone)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        680,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER_SELECT_IN_UI",
+          "name": "SC Salon Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT role, text FROM messages WHERE phone = $1 ORDER BY created_at DESC LIMIT 10;",
+        "options": {
+          "queryReplacement": "={{ [$('Normalize inbound').first().json.phone] }}"
+        }
+      },
+      "id": "load-recent-messages-context",
+      "name": "Load recent messages (context)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        900,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER_SELECT_IN_UI",
+          "name": "SC Salon Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (phone, role, text) VALUES ($1, 'user', $2);",
+        "options": {
+          "queryReplacement": "={{ [$('Normalize inbound').first().json.phone, $('Normalize inbound').first().json.text] }}"
+        }
+      },
+      "id": "log-inbound-message",
+      "name": "Log inbound message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1120,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER_SELECT_IN_UI",
+          "name": "SC Salon Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// BUILD PROMPT \u2014 persona + services (from DB) + recent history + the new message.\n// n8n keeps every node's output addressable, so we pull context by node name.\nconst norm = $('Normalize inbound').first().json;                 // { phone, text, name }\nconst recent = $('Load recent messages (context)').all()          // newest-first rows\n  .map(i => i.json).reverse();                                     // -> chronological\n\n// SERVICES (from DB): production wires a `SELECT * FROM services` Postgres read into\n// this node (a documented extension point). Embedded here from the seed so the\n// scaffold is self-contained and the prompt is realistic.\nconst services = [\n  { name: \"Women's Haircut\", price: 45,  duration_min: 60 },\n  { name: \"Men's Haircut\",   price: 30,  duration_min: 45 },\n  { name: \"Blow-Dry & Style\",price: 40,  duration_min: 45 },\n  { name: \"Full Color\",      price: 110, duration_min: 90 },\n  { name: \"Balayage\",        price: 180, duration_min: 150 },\n  { name: \"Root Touch-Up\",   price: 75,  duration_min: 60 },\n  { name: \"Manicure\",        price: 35,  duration_min: 40 },\n  { name: \"Pedicure\",        price: 50,  duration_min: 55 }\n];\n\nconst persona = [\n  'You are the friendly, concise front-desk receptionist for \"SC Salon\".',\n  'Use ONLY the services and prices listed below. Never invent a service, a price, or availability.',\n  'To capture a booking you must collect: service, preferred time, name, and email.',\n  'When you have all four, set booking.ready = true. Otherwise ask for exactly one missing item.',\n  'Be warm and brief \u2014 1 to 3 short sentences.'\n].join('\\n');\n\nconst menu = services.map(s => `- ${s.name}: $${s.price} (${s.duration_min} min)`).join('\\n');\nconst history = recent.map(m => `${m.role === 'user' ? 'Customer' : 'Receptionist'}: ${m.text}`).join('\\n');\n\nconst prompt = [\n  persona,\n  '\\nSERVICES:\\n' + menu,\n  history ? '\\nCONVERSATION SO FAR:\\n' + history : '',\n  '\\nNEW MESSAGE from ' + (norm.name || 'the customer') + ':\\n' + norm.text,\n  '\\nRespond with JSON ONLY, in exactly this shape:',\n  '{\"reply\":\"...\",\"intent\":\"faq|services|booking|smalltalk|other\",' +\n  '\"booking\":{\"service\":null,\"requested_time\":null,\"name\":null,\"email\":null,\"ready\":false},\"missing\":[]}'\n].join('\\n');\n\nreturn [{ json: { prompt, phone: norm.phone } }];\n"
+      },
+      "id": "build-prompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gemma3:4b\",\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"stream\": false,\n  \"format\": \"json\",\n  \"options\": { \"temperature\": 0.2 }\n}",
+        "options": {}
+      },
+      "id": "receptionist-ollama-gemma3:4b",
+      "name": "Receptionist (Ollama gemma3:4b)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        400
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "SWAP-POINT / LLM \u2014 local Ollama gemma3:4b. Swap the URL/model for any cloud LLM. format:json + low temp keep output parseable."
+    },
+    {
+      "parameters": {
+        "jsCode": "// PARSE + FALLBACK \u2014 read the Ollama response, parse strict JSON. On ANY failure\n// (bad JSON, missing fields, model hiccup) synthesize a safe reply so the flow\n// never breaks and the customer always gets an answer.\nconst phone = $('Build prompt').first().json.phone;\nlet raw = $json.response ?? $json.data ?? ($json.body && $json.body.response) ?? '';\nlet out;\ntry {\n  out = typeof raw === 'string' ? JSON.parse(raw) : raw;\n  if (!out || typeof out.reply !== 'string') throw new Error('missing reply');\n} catch (e) {\n  out = {\n    reply: \"Thanks for reaching out! I'd love to help \u2014 which service are you interested in?\",\n    intent: 'other',\n    booking: { service: null, requested_time: null, name: null, email: null, ready: false },\n    missing: ['service'],\n    _fallback: true\n  };\n}\nconst b = out.booking || {};\nreturn [{ json: {\n  phone,\n  reply: out.reply,\n  intent: out.intent ?? 'other',\n  booking_ready: b.ready === true,\n  service: b.service ?? null,\n  requested_time: b.requested_time ?? null,\n  cust_name: b.name ?? null,\n  cust_email: b.email ?? null,\n  missing: Array.isArray(out.missing) ? out.missing : [],\n  fallback: out._fallback === true\n}}];\n"
+      },
+      "id": "parse-llm-reply-+-fallback",
+      "name": "Parse LLM reply + Fallback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c1",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.booking_ready }}",
+              "rightValue": ""
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "booking-ready",
+      "name": "Booking ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO appointments (phone, service_id, requested_time, status, notes)\nVALUES ($1, (SELECT id FROM services WHERE name = $2), $3, 'pending', $4);",
+        "options": {
+          "queryReplacement": "={{ [ $('Parse LLM reply + Fallback').first().json.phone, $('Parse LLM reply + Fallback').first().json.service, $('Parse LLM reply + Fallback').first().json.requested_time, 'Booking request via WhatsApp receptionist' ] }}"
+        }
+      },
+      "id": "book-appointment-pending",
+      "name": "Book appointment (pending)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2260,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER_SELECT_IN_UI",
+          "name": "SC Salon Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "notify-owner-mock",
+      "name": "Notify owner (MOCK)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2480,
+        300
+      ],
+      "notes": "SWAP-POINT / OWNER NOTIFY \u2014 send the owner a WhatsApp/email/Slack ping to confirm this pending booking. CALENDLY-ACUITY-on-confirm: on the owner's confirmation, sync the slot to Calendly/Acuity (documented, not built)."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (phone, role, text) VALUES ($1, 'assistant', $2);",
+        "options": {
+          "queryReplacement": "={{ [ $('Parse LLM reply + Fallback').first().json.phone, $('Parse LLM reply + Fallback').first().json.reply ] }}"
+        }
+      },
+      "id": "log-assistant-reply",
+      "name": "Log assistant reply",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2700,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER_SELECT_IN_UI",
+          "name": "SC Salon Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "whatsapp-send-mock",
+      "name": "WhatsApp send (MOCK)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2920,
+        400
+      ],
+      "notes": "SWAP-POINT / WHATSAPP SEND \u2014 replace with the Meta WhatsApp Cloud API send call, posting $('Parse LLM reply + Fallback').first().json.reply back to the customer's phone."
+    }
+  ],
+  "connections": {
+    "WhatsApp inbound (MOCK webhook)": {
+      "main": [
+        [
+          {
+            "node": "Normalize inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize inbound": {
+      "main": [
+        [
+          {
+            "node": "Upsert customer (phone)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert customer (phone)": {
+      "main": [
+        [
+          {
+            "node": "Load recent messages (context)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load recent messages (context)": {
+      "main": [
+        [
+          {
+            "node": "Log inbound message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log inbound message": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Receptionist (Ollama gemma3:4b)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Receptionist (Ollama gemma3:4b)": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM reply + Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM reply + Fallback": {
+      "main": [
+        [
+          {
+            "node": "Booking ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Booking ready?": {
+      "main": [
+        [
+          {
+            "node": "Book appointment (pending)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log assistant reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Book appointment (pending)": {
+      "main": [
+        [
+          {
+            "node": "Notify owner (MOCK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify owner (MOCK)": {
+      "main": [
+        [
+          {
+            "node": "Log assistant reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log assistant reply": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp send (MOCK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateId": "sc-agentic-whatsapp-receptionist-v1"
+  },
+  "tags": []
+}
