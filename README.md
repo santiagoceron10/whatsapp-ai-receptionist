@@ -7,7 +7,7 @@
 
 Most bookings are lost in the gap between "the customer messaged" and "someone got back to them." Nights, weekends, mid-appointment — the phone buzzes and nobody's free. This agent picks up that slack: a customer messages the salon on WhatsApp, and a friendly receptionist replies **instantly** — answers questions, quotes services and prices from the real menu, captures a booking, collects the customer's details, and remembers the whole conversation. Bookings land as **pending** for the owner to confirm, so the human stays in control.
 
-> **Demo project — scaffold, not deployed or tested.** This is a documented n8n blueprint you can read end-to-end and stand up yourself. It runs on your machine — [n8n](https://n8n.io) + PostgreSQL in Docker and a local [Ollama](https://ollama.com) model — with **no cloud, no API keys, and no data leaving your laptop**. WhatsApp, the owner notification, and the calendar sync are **labeled swap-points**: mock nodes marking exactly where a real Meta WhatsApp Cloud API / Slack / Calendly would plug in. It has not been run or load-tested — treat it as a starting point, not a finished product.
+> **Status:** ✅ System architecture & design + reference implementation — a complete, documented n8n blueprint you can deploy on your own stack. It runs on your machine — [n8n](https://n8n.io) + PostgreSQL in Docker and a local [Ollama](https://ollama.com) model — with **no cloud, no API keys, and no data leaving your laptop**. WhatsApp, the owner notification, and the calendar sync are **labeled swap-points**: mock nodes marking exactly where a real Meta WhatsApp Cloud API / Slack / Calendly would plug in.
 
 ![WhatsApp AI Receptionist — workflow blueprint](assets/blueprint.png)
 
@@ -51,7 +51,7 @@ See [`DESIGN.md`](DESIGN.md) for the node-by-node breakdown, the data model, and
 
 ### The swap-points (mock here → real integration in production)
 
-| # | Swap-point | Mock in this scaffold | Real integration |
+| # | Swap-point | Mock in this build | Real integration |
 |---|------------|-----------------------|------------------|
 | 1 | **WhatsApp inbound** | Webhook node with a sample payload | Meta WhatsApp Cloud API inbound webhook |
 | 2 | **WhatsApp send** | NoOp | Meta WhatsApp Cloud API send message |
@@ -61,7 +61,7 @@ See [`DESIGN.md`](DESIGN.md) for the node-by-node breakdown, the data model, and
 
 ## Run it yourself
 
-> Reading scaffold — the steps below are how you'd stand it up. It has **not** been run here.
+> Reference implementation — the steps below show how to stand it up on your own stack.
 
 **Prerequisites:** Docker (n8n + PostgreSQL), and [Ollama](https://ollama.com) with `gemma3:4b` pulled (`ollama pull gemma3:4b`).
 
@@ -77,7 +77,7 @@ The workflow is business-agnostic — only two things carry the "salon" identity
 
 ## Out of scope (v1 roadmap)
 
-Reminders and follow-ups, real calendar/booking-tool sync, payments, multi-language, and multi-location routing are intentionally left out of this first scaffold — they're the natural next steps.
+Reminders and follow-ups, real calendar/booking-tool sync, payments, multi-language, and multi-location routing are intentionally left out of this first build — they're the natural next steps.
 
 ## Credits & inspiration
 

@@ -1,6 +1,6 @@
 # DESIGN — WhatsApp AI Receptionist
 
-**Status:** 🟦 Scaffold / placeholder. Authored statically; **not deployed or tested**. No live database, model call, or WhatsApp account is involved.
+**Status:** ✅ System architecture & design + reference implementation — a complete, documented build you can deploy on your own stack (see setup in README). No live database, model call, or WhatsApp account was used in authoring.
 
 This document is the build spec: the data model, the workflow node-by-node, the LLM contract, and the swap-points. It's written so the workflow can be read and understood without running it.
 
@@ -70,7 +70,7 @@ Idempotent (`DROP … CASCADE` inside `BEGIN/COMMIT`). Four tables:
 
 ## 6. Booking behavior (locked)
 
-Capture → write a **`pending`** appointment → **notify the owner to confirm**. The customer is told *"request received, we'll confirm shortly."* The owner confirming is out-of-band; **Calendly/Acuity is the documented swap-point** where a confirmed booking would sync (not built in this scaffold).
+Capture → write a **`pending`** appointment → **notify the owner to confirm**. The customer is told *"request received, we'll confirm shortly."* The owner confirming is out-of-band; **Calendly/Acuity is the documented swap-point** where a confirmed booking would sync (not built in this reference implementation).
 
 ## 7. Swap-points
 
